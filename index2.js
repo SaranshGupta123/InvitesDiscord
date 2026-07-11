@@ -1,0 +1,202 @@
+require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const gTTS = require("gtts");
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  ChannelType,
+} = require("discord.js");
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  entersState,
+} = require("@discordjs/voice");
+
+// --- CONFIGURATION ---
+const TOKEN = process.env.DISCORD_TOKEN;
+const GUILD_ID = process.env.GUILD_ID;
+
+// Comma-separated list of user IDs allowed to trigger TTS, e.g. "123,456,789"
+const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
+
+// Optional: restrict to a single text channel where the bot listens.
+// Leave blank to listen in every channel it can read.
+const LISTEN_CHANNEL_ID = process.env.LISTEN_CHANNEL_ID || null;
+
+const TTS_LANG = "hi"; // Hindi
+// ---------------------
+
+if (!TOKEN || !GUILD_ID || ALLOWED_USER_IDS.length === 0) {
+  console.error(
+    "Missing required env vars. Check DISCORD_TOKEN, GUILD_ID, and ALLOWED_USER_IDS in your .env file.",
+  );
+  process.exit(1);
+}
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
+  ],
+  partials: [Partials.Channel],
+});
+
+// Keep one active voice connection + player per guild
+const connections = new Map();
+
+client.once("clientReady", () => {
+  console.log(`Logged in as ${client.user.tag}! Ready for Hindi TTS.`);
+});
+
+function textToSpeechFile(text) {
+  return new Promise((resolve, reject) => {
+    const tts = new gTTS(text, TTS_LANG);
+    const filePath = path.join(
+      os.tmpdir(),
+      `tts-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`,
+    );
+    tts.save(filePath, (err) => {
+      if (err) return reject(err);
+      resolve(filePath);
+    });
+  });
+}
+
+async function speakInChannel(voiceChannel, text) {
+  const guildId = voiceChannel.guild.id;
+
+  let entry = connections.get(guildId);
+
+  if (!entry || entry.connection.joinConfig.channelId !== voiceChannel.id) {
+    const connection = joinVoiceChannel({
+      channelId: voiceChannel.id,
+      guildId: voiceChannel.guild.id,
+      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      selfDeaf: true,
+    });
+
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+    } catch (err) {
+      connection.destroy();
+      console.error("Failed to join voice channel:", err);
+      return;
+    }
+
+    const player = createAudioPlayer();
+    connection.subscribe(player);
+
+    entry = { connection, player };
+    connections.set(guildId, entry);
+
+    connection.on(VoiceConnectionStatus.Disconnected, () => {
+      connections.delete(guildId);
+    });
+  }
+
+  let filePath;
+  try {
+    filePath = await textToSpeechFile(text);
+  } catch (err) {
+    console.error("TTS generation failed:", err);
+    return;
+  }
+
+  const resource = createAudioResource(filePath);
+  entry.player.play(resource);
+
+  entry.player.once(AudioPlayerStatus.Idle, () => {
+    fs.unlink(filePath, () => {});
+  });
+}
+
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (!message.guild || message.guild.id !== GUILD_ID) return;
+  if (LISTEN_CHANNEL_ID && message.channel.id !== LISTEN_CHANNEL_ID) return;
+
+  // Only allow specific people to trigger TTS
+  if (!ALLOWED_USER_IDS.includes(message.author.id)) return;
+
+  const text = message.content?.trim();
+  if (!text) return;
+
+  const member = await message.guild.members
+    .fetch(message.author.id)
+    .catch(() => null);
+  const voiceChannel = member?.voice?.channel;
+
+  if (!voiceChannel) {
+    message
+      .reply("Join a voice channel first, then send your message again! 🎙️")
+      .catch(() => {});
+    return;
+  }
+
+  try {
+    await speakInChannel(voiceChannel, text);
+  } catch (err) {
+    console.error("Failed to speak message:", err);
+  }
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== "speak") return;
+  if (!interaction.guild || interaction.guild.id !== GUILD_ID) return;
+
+  // Only allow specific people to use the command
+  if (!ALLOWED_USER_IDS.includes(interaction.user.id)) {
+    await interaction.reply({
+      content: "You're not allowed to use this command. 🚫",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const text = interaction.options.getString("message", true).trim();
+  const chosenChannel = interaction.options.getChannel("channel");
+
+  let voiceChannel = chosenChannel;
+
+  // If no channel was given, fall back to the command user's current voice channel
+  if (!voiceChannel) {
+    const member = await interaction.guild.members
+      .fetch(interaction.user.id)
+      .catch(() => null);
+    voiceChannel = member?.voice?.channel || null;
+  }
+
+  if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) {
+    await interaction.reply({
+      content:
+        "Join a voice channel first, or pick one with the `channel` option. 🎙️",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.reply({
+    content: `Joining **${voiceChannel.name}** and speaking your message in Hindi... 🗣️`,
+    ephemeral: true,
+  });
+
+  try {
+    await speakInChannel(voiceChannel, text);
+  } catch (err) {
+    console.error("Failed to speak message via /speak:", err);
+  }
+});
+
+client.login(TOKEN);

@@ -1,0 +1,5 @@
+DISCORD_TOKEN=your_bot_token_here
+GUILD_ID=your_guild_id_here
+ROLE_ID_1=your_first_role_id_here
+ROLE_ID_2=your_second_role_id_here
+ANNOUNCE_CHANNEL_ID=your_announcement_channel_id_here

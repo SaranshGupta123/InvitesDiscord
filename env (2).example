@@ -1,0 +1,8 @@
+DISCORD_TOKEN=your_bot_token_here
+GUILD_ID=your_guild_id_here
+
+# Comma-separated Discord user IDs allowed to trigger TTS
+ALLOWED_USER_IDS=1499437545363083499,222222222222222222
+
+# Optional: only listen in this text channel. Leave blank to listen everywhere.
+LISTEN_CHANNEL_ID=
