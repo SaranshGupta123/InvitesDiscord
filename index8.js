@@ -315,6 +315,22 @@ const HISTORY_FILE = path.join(__dirname, "invite-history.jsonl");
 // =====================================================================
 
 const ACTIVITY_DATA_FILE = path.join(__dirname, "activity.json");
+const STICKY_DATA_FILE = path.join(__dirname, "stickies.json");
+function loadStickies() {
+  if (!fs.existsSync(STICKY_DATA_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(STICKY_DATA_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveStickies(data) {
+  fs.writeFileSync(STICKY_DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+let stickies = loadStickies(); // keyed by channelId
+const isStickyUpdating = new Set(); // Debounce map to prevent rate-limit crashes
 
 function loadActivityData() {
   if (!fs.existsSync(ACTIVITY_DATA_FILE)) return {};
@@ -651,6 +667,25 @@ const lastListCache = new Map(); // userId -> array of channels in listed order
 // =====================================================================
 
 const commands = [
+  new SlashCommandBuilder()
+    .setName("sticky")
+    .setDescription("Manage sticky messages in this channel (admin/owner only)")
+    .addSubcommand((sub) =>
+      sub
+        .setName("set")
+        .setDescription("Set a sticky message for the current channel")
+        .addStringOption((opt) =>
+          opt
+            .setName("text")
+            .setDescription("The message to stick to the bottom")
+            .setRequired(true),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("remove")
+        .setDescription("Remove the sticky message from this channel"),
+    ),
   new SlashCommandBuilder()
     .setName("activity")
     .setDescription("Check voice and text activity stats")
@@ -1072,6 +1107,70 @@ client.on("guildMemberRemove", (member) => {
 
 client.on("interactionCreate", async (interaction) => {
   try {
+    // --- /sticky ---
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "sticky"
+    ) {
+      if (!hasAdminPermission(interaction)) {
+        return interaction.reply({
+          content: "🚫 You do not have permission to manage sticky messages.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const sub = interaction.options.getSubcommand();
+      const channelId = interaction.channelId;
+
+      if (sub === "set") {
+       const text = interaction.options
+         .getString("text", true)
+         .replace(/\\n/g, "\n");
+
+        // Delete the old sticky if it exists before making a new one
+        if (stickies[channelId] && stickies[channelId].lastMessageId) {
+          interaction.channel.messages
+            .delete(stickies[channelId].lastMessageId)
+            .catch(() => {});
+        }
+
+        // Send the new sticky message
+        const sentMsg = await interaction.channel.send({ content: text });
+
+        stickies[channelId] = {
+          content: text,
+          lastMessageId: sentMsg.id,
+        };
+        saveStickies(stickies);
+
+        return interaction.reply({
+          content: "✅ Sticky message set for this channel!",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      if (sub === "remove") {
+        if (!stickies[channelId]) {
+          return interaction.reply({
+            content: "⚠️ No sticky message exists in this channel.",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        const oldId = stickies[channelId].lastMessageId;
+        if (oldId) {
+          interaction.channel.messages.delete(oldId).catch(() => {});
+        }
+
+        delete stickies[channelId];
+        saveStickies(stickies);
+
+        return interaction.reply({
+          content: "✅ Sticky message removed.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    }
     // --- /activity ---
     if (
       interaction.isChatInputCommand() &&
@@ -1762,6 +1861,33 @@ client.on("interactionCreate", async (interaction) => {
 // =====================================================================
 
 client.on("messageCreate", async (message) => {
+  // --- STICKY MESSAGE LOGIC ---
+  const sticky = stickies[message.channel.id];
+
+  // If there's a sticky in this channel AND it's not currently being refreshed
+  if (sticky && !isStickyUpdating.has(message.channel.id)) {
+    isStickyUpdating.add(message.channel.id);
+
+    // Delete the previous sticky message
+    if (sticky.lastMessageId) {
+      message.channel.messages.delete(sticky.lastMessageId).catch(() => {});
+    }
+
+    // Send the new one and update the ID
+    message.channel
+      .send({ content: sticky.content })
+      .then((newMsg) => {
+        sticky.lastMessageId = newMsg.id;
+        saveStickies(stickies);
+
+        // Cooldown timer (prevents bot from spam-deleting if users chat rapidly)
+        setTimeout(() => isStickyUpdating.delete(message.channel.id), 2500);
+      })
+      .catch((err) => {
+        console.error("Sticky message error:", err);
+        isStickyUpdating.delete(message.channel.id);
+      });
+  }
   if (message.author.bot) return;
   // ==========================================================
   // PREFIX COMMAND: diva @user
@@ -2034,6 +2160,100 @@ client.on("messageCreate", async (message) => {
     } catch (error) {
       console.error("Vanity Fetch Error:", error);
       return message.reply("❌ Could not fetch vanity.");
+    }
+  }
+  // ==========================================================
+  // ADD/REMOVE ROLE BY PARTIAL NAME: .role @user <role name>
+  // ==========================================================
+  if (msg.startsWith(".role")) {
+    // 1. Check if the person using the command is in the allowed list
+    const allowedRoleManagers = (process.env.ROLE_MANAGER_USER_IDS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (
+      !allowedRoleManagers.includes(message.author.id) &&
+      message.author.id !== message.guild.ownerId
+    ) {
+      return message.reply(
+        "🚫 You don't have permission to use the role command.",
+      );
+    }
+
+    const args = rawContent.split(/\s+/);
+    const targetMember = message.mentions.members.first();
+
+    if (!targetMember) {
+      return message.reply(
+        "⚠️ Please mention the user. Example: `.role @user admin`",
+      );
+    }
+
+    // 2. Extract the search text (everything after the command and the mention)
+    const roleSearch = rawContent
+      .replace(args[0], "") // removes ".role"
+      .replace(/<@!?\d+>/, "") // removes the user mention
+      .trim()
+      .toLowerCase();
+
+    if (!roleSearch) {
+      return message.reply(
+        "⚠️ Please type part of the role name to search for.",
+      );
+    }
+
+    // 3. Find the role (tries exact match first, then partial match)
+    let targetRole = message.guild.roles.cache.find(
+      (r) => r.name.toLowerCase() === roleSearch,
+    );
+    if (!targetRole) {
+      targetRole = message.guild.roles.cache.find((r) =>
+        r.name.toLowerCase().includes(roleSearch),
+      );
+    }
+
+    if (!targetRole) {
+      return message.reply(
+        `❌ No role found in this server containing "${roleSearch}".`,
+      );
+    }
+
+    // 4. Role Hierarchy Safety Checks
+    if (
+      message.guild.members.me.roles.highest.position <= targetRole.position
+    ) {
+      return message.reply(
+        "❌ I cannot give this role because it is higher than or equal to my own highest role.",
+      );
+    }
+    if (
+      message.member.roles.highest.position <= targetRole.position &&
+      message.guild.ownerId !== message.author.id
+    ) {
+      return message.reply(
+        "❌ You cannot manage this role because it is higher than or equal to your own highest role.",
+      );
+    }
+
+    // 5. Toggle the role
+    try {
+      if (targetMember.roles.cache.has(targetRole.id)) {
+        await targetMember.roles.remove(targetRole);
+        return message.reply(
+          `✅ Removed the **${targetRole.name}** role from ${targetMember}.`,
+        );
+      } else {
+        await targetMember.roles.add(targetRole);
+        return message.reply(
+          `✅ Added the **${targetRole.name}** role to ${targetMember}.`,
+        );
+      }
+    } catch (err) {
+      console.error("Role assign error:", err);
+      return message.reply(
+        "❌ An error occurred while trying to manage that role.",
+      );
     }
   }
   if (msg === ".quote") {
