@@ -309,6 +309,26 @@ async function endGiveaway(client, messageId, { reroll = false } = {}) {
 
 const INVITES_DATA_FILE = path.join(__dirname, "invites.json");
 const HISTORY_FILE = path.join(__dirname, "invite-history.jsonl");
+// =====================================================================
+// ==================  REPUTATION SYSTEM SECTION  ======================
+// =====================================================================
+
+const REP_DATA_FILE = path.join(__dirname, "reps.json");
+
+function loadRepData() {
+  if (!fs.existsSync(REP_DATA_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(REP_DATA_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveRepData(data) {
+  fs.writeFileSync(REP_DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+let repStore = loadRepData();
 
 // =====================================================================
 // ==================  ACTIVITY TRACKER SECTION  =======================
@@ -651,6 +671,37 @@ const lastListCache = new Map(); // userId -> array of channels in listed order
 // =====================================================================
 
 const commands = [
+  new SlashCommandBuilder()
+    .setName("rep")
+    .setDescription("Reputation system to show who is legit and trusted")
+    .addSubcommand((sub) =>
+      sub
+        .setName("give")
+        .setDescription("Vouch for someone and give them +1 Rep")
+        .addUserOption((opt) =>
+          opt
+            .setName("user")
+            .setDescription("The user you are repping")
+            .setRequired(true),
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("reason")
+            .setDescription("Why are they legit?")
+            .setRequired(false),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("view")
+        .setDescription("Check someone's rep profile")
+        .addUserOption((opt) =>
+          opt
+            .setName("user")
+            .setDescription("The user to check (defaults to you)")
+            .setRequired(false),
+        ),
+    ),
   new SlashCommandBuilder()
     .setName("activity")
     .setDescription("Check voice and text activity stats")
@@ -1130,6 +1181,93 @@ client.on("guildMemberUpdate", (oldMember, newMember) => {
 
 client.on("interactionCreate", async (interaction) => {
   try {
+    // --- /rep ---
+    if (interaction.isChatInputCommand() && interaction.commandName === "rep") {
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.guildId;
+
+      if (!repStore[guildId]) repStore[guildId] = {};
+
+      if (sub === "give") {
+        const targetUser = interaction.options.getUser("user", true);
+        const reason =
+          interaction.options.getString("reason") || "No reason provided.";
+
+        if (targetUser.id === interaction.user.id) {
+          return interaction.reply({
+            content: "❌ Nice try, but you can't rep yourself!",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (targetUser.bot) {
+          return interaction.reply({
+            content: "❌ You cannot rep bots!",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        if (!repStore[guildId][targetUser.id]) {
+          repStore[guildId][targetUser.id] = { count: 0, history: [] };
+        }
+
+        // Add rep and save history
+        repStore[guildId][targetUser.id].count += 1;
+        repStore[guildId][targetUser.id].history.push({
+          from: interaction.user.id,
+          reason: reason,
+          date: Date.now(),
+        });
+
+        // Keep history limited to the last 10 entries to save space
+        if (repStore[guildId][targetUser.id].history.length > 10) {
+          repStore[guildId][targetUser.id].history.shift();
+        }
+
+        saveRepData(repStore);
+
+        return interaction.reply({
+          content: `✅ You gave **+1 Rep** to <@${targetUser.id}>!\n📝 **Reason:** ${reason}`,
+        });
+      }
+
+      if (sub === "view") {
+        const targetUser =
+          interaction.options.getUser("user") || interaction.user;
+        const stats = repStore[guildId]?.[targetUser.id] || {
+          count: 0,
+          history: [],
+        };
+
+        const embed = new EmbedBuilder()
+          .setColor(0x00ff00)
+          .setTitle(`⭐ Reputation Profile — ${targetUser.username}`)
+          .setThumbnail(targetUser.displayAvatarURL())
+          .setDescription(
+            `<@${targetUser.id}> currently has **${stats.count}** Rep points! This shows they are legit and trusted.`,
+          )
+          .setTimestamp();
+
+        if (stats.history.length > 0) {
+          // Grab the 5 most recent reps
+          const historyLines = stats.history
+            .slice(-5)
+            .reverse()
+            .map(
+              (h) =>
+                `> **<@${h.from}>:** ${h.reason} *(<t:${Math.floor(h.date / 1000)}:R>)*`,
+            )
+            .join("\n");
+          embed.addFields({ name: "Recent Vouches", value: historyLines });
+        } else {
+          embed.addFields({
+            name: "Recent Vouches",
+            value: "> *No rep history yet.*",
+          });
+        }
+
+        return interaction.reply({ embeds: [embed] });
+      }
+    }
     // --- /activity ---
     if (
       interaction.isChatInputCommand() &&

@@ -309,6 +309,25 @@ async function endGiveaway(client, messageId, { reroll = false } = {}) {
 
 const INVITES_DATA_FILE = path.join(__dirname, "invites.json");
 const HISTORY_FILE = path.join(__dirname, "invite-history.jsonl");
+// =====================================================================
+// ====================  REPUTATION SECTION  ===========================
+// =====================================================================
+const REP_DATA_FILE = path.join(__dirname, "rep.json");
+
+function loadRepData() {
+  if (!fs.existsSync(REP_DATA_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(REP_DATA_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveRepData(data) {
+  fs.writeFileSync(REP_DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+let repStore = loadRepData();
 
 // =====================================================================
 // ==================  ACTIVITY TRACKER SECTION  =======================
@@ -667,6 +686,26 @@ const lastListCache = new Map(); // userId -> array of channels in listed order
 // =====================================================================
 
 const commands = [
+  new SlashCommandBuilder()
+    .setName("rep")
+    .setDescription("Reputation system")
+    .addSubcommand((sub) =>
+      sub
+        .setName("give")
+        .setDescription("Give +1 rep to a user")
+        .addUserOption((opt) =>
+          opt
+            .setName("user")
+            .setDescription("The user to vouch for")
+            .setRequired(true),
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("reason")
+            .setDescription("Reason for giving rep")
+            .setRequired(true),
+        ),
+    ),
   new SlashCommandBuilder()
     .setName("sticky")
     .setDescription("Manage sticky messages in this channel (admin/owner only)")
@@ -1107,6 +1146,92 @@ client.on("guildMemberRemove", (member) => {
 
 client.on("interactionCreate", async (interaction) => {
   try {
+    // --- /rep ---
+    if (interaction.isChatInputCommand() && interaction.commandName === "rep") {
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === "give") {
+        const targetUser = interaction.options.getUser("user", true);
+        const reason = interaction.options.getString("reason", true);
+        const guildId = interaction.guildId;
+
+        // Prevent users from giving rep to themselves
+        if (targetUser.id === interaction.user.id) {
+          return interaction.reply({
+            content: "❌ You cannot give rep to yourself!",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        // Prevent giving rep to bots
+        if (targetUser.bot) {
+          return interaction.reply({
+            content: "❌ You cannot give rep to bots!",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        // Ensure the data structure exists for this server and user
+        // Ensure the data structure exists for this server and user
+        if (!repStore[guildId]) repStore[guildId] = {};
+        if (!repStore[guildId][targetUser.id]) {
+          repStore[guildId][targetUser.id] = { count: 0, history: [] };
+        }
+
+        // Fallback for existing users who might not have a history array yet
+        if (!repStore[guildId][targetUser.id].history) {
+          repStore[guildId][targetUser.id].history = [];
+        }
+
+        // Increment the rep and store the exact reason
+        repStore[guildId][targetUser.id].count += 1;
+        repStore[guildId][targetUser.id].history.push({
+          giverId: interaction.user.id,
+          reason: reason,
+          timestamp: Date.now(),
+        });
+
+        // ==========================================
+        // YOUR SNIPPET STARTS HERE
+        // ==========================================
+        saveRepData(repStore);
+
+        // --- NEW: SEND TO REP LOG CHANNEL ---
+        const repLogChannelId = process.env.REP_LOG_CHANNEL_ID;
+        if (repLogChannelId) {
+          const logChannel =
+            interaction.guild.channels.cache.get(repLogChannelId);
+          if (logChannel) {
+            const logEmbed = new EmbedBuilder()
+              .setColor(0xffd700) // Gold color for reputation
+              .setTitle("🌟 New Reputation Vouch!")
+              .setDescription(
+                `<@${interaction.user.id}> just vouched for <@${targetUser.id}>!`,
+              )
+              .addFields(
+                { name: "📝 Reason", value: reason },
+                {
+                  name: "📈 Total Rep",
+                  value: `${repStore[guildId][targetUser.id].count} Rep Points`,
+                  inline: true,
+                },
+              )
+              .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+              .setTimestamp();
+
+            logChannel.send({ embeds: [logEmbed] }).catch(console.error);
+          }
+        }
+        // ------------------------------------
+
+        return interaction.reply({
+          content: `✅ You gave **+1 Rep** to <@${targetUser.id}>!\n📝 **Reason:** ${reason}`,
+        });
+        // ==========================================
+        // YOUR SNIPPET ENDS HERE
+        // ==========================================
+      }
+    }
     // --- /sticky ---
     if (
       interaction.isChatInputCommand() &&
@@ -2505,12 +2630,30 @@ client.on("messageCreate", async (message) => {
   try {
     const status = await obs.call("GetRecordStatus");
 
-    if (msg.includes("isrecording")) {
-      return message.reply(
-        status.outputActive
-          ? "🟢 OBS is Recording."
-          : "🔴 OBS is NOT Recording.",
-      );
+    if (msg.includes("clip")) {
+      if (!status.outputActive) {
+        return message.reply(
+          "🔴 OBS is not currently recording, so I can't grab a timestamp or clip.",
+        );
+      }
+
+      // OBS returns a timecode string like "00:15:30.123" showing how long it has been recording
+      const timecode = status.outputTimecode || "Unknown Time";
+
+      try {
+        // This tells OBS to save the last X seconds to a separate video file!
+        await obs.call("SaveReplayBuffer");
+
+        return message.reply(
+          `🎬 **Clip Saved!**\n⏱️ Timestamp in main recording: \`${timecode}\``,
+        );
+      } catch (replayErr) {
+        // If Replay Buffer is turned off, we still log the timestamp for you to find it easily in editing.
+        console.warn("Replay Buffer not active in OBS.");
+        return message.reply(
+          `📍 **Timestamp Logged!**\n⏱️ Exact time in recording: \`${timecode}\`\n\n*(Note: I couldn't save a separate video file. Make sure **Start Replay Buffer** is clicked in OBS if you want automatic clip files!)*`,
+        );
+      }
     }
     if (msg.includes("start recording")) {
       if (status.outputActive) return message.reply("Already recording.");
