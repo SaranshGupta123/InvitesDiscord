@@ -29,8 +29,9 @@ const GLOBAL_ADMINS = [
 const serverPlayers = new Map();
 
 // --- Locate yt-dlp: prefer a copy sitting next to this script, else fall back to PATH ---
-const LOCAL_YTDLP = path.join(__dirname, "yt-dlp.exe");
-const YTDLP_CMD = fs.existsSync(LOCAL_YTDLP) ? LOCAL_YTDLP : "yt-dlp";
+// const LOCAL_YTDLP = path.join(__dirname, "yt-dlp.exe");
+// const YTDLP_CMD = fs.existsSync(LOCAL_YTDLP) ? LOCAL_YTDLP : "yt-dlp";
+const YTDLP_CMD = "yt-dlp";
 
 function readJSON(file) {
   if (!fs.existsSync(file)) return {};
