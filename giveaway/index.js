@@ -1027,6 +1027,14 @@ client.once("clientReady", () => {
     }
   }
 });
+client.once("clientReady", () => {
+  console.log("Logged in Bot ID:", client.user.id);
+  console.log("Application ID:", client.application.id);
+  console.log("Guilds:");
+  client.guilds.cache.forEach((g) => {
+    console.log(`${g.name} -> ${g.id}`);
+  });
+});
 
 // --- Activity Tracker: Voice State Updates ---
 client.on("voiceStateUpdate", (oldState, newState) => {
@@ -2381,10 +2389,10 @@ client.on("messageCreate", async (message) => {
       );
     }
   }
-  if (msg === ".quote") {
+  if (msg === ",quote") {
     if (!message.reference) {
       return message.reply(
-        "⚠️ Reply to the message you want to quote, then type `.quote`.",
+        "⚠️ Reply to the message you want to quote, then type `,quote`.",
       );
     }
 

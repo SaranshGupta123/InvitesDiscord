@@ -645,6 +645,15 @@ async function connectOBS() {
     console.error("ACTUAL OBS ERROR:", err.message);
   }
 }
+async function checkRecordingStatus() {
+  try {
+    const status = await obs.call("GetRecordStatus");
+    return status.outputActive;
+  } catch (err) {
+    console.error("OBS Status Error:", err);
+    return null;
+  }
+}
 obs.on("ConnectionClosed", () => {
   console.warn(
     "⚠️ OBS connection lost. Attempting to reconnect in 5 seconds...",

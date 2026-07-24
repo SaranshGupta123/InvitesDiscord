@@ -1027,6 +1027,14 @@ client.once("clientReady", () => {
     }
   }
 });
+client.once("clientReady", () => {
+  console.log("Logged in Bot ID:", client.user.id);
+  console.log("Application ID:", client.application.id);
+  console.log("Guilds:");
+  client.guilds.cache.forEach((g) => {
+    console.log(`${g.name} -> ${g.id}`);
+  });
+});
 
 // --- Activity Tracker: Voice State Updates ---
 client.on("voiceStateUpdate", (oldState, newState) => {
@@ -2381,10 +2389,10 @@ client.on("messageCreate", async (message) => {
       );
     }
   }
-  if (msg === ".quote") {
+  if (msg === ",quote") {
     if (!message.reference) {
       return message.reply(
-        "⚠️ Reply to the message you want to quote, then type `.quote`.",
+        "⚠️ Reply to the message you want to quote, then type `,quote`.",
       );
     }
 
@@ -2630,31 +2638,31 @@ client.on("messageCreate", async (message) => {
   try {
     const status = await obs.call("GetRecordStatus");
 
-if (msg.includes("clip")) {
-  if (!status.outputActive) {
-    return message.reply(
-      "🔴 OBS is not currently recording, so I can't grab a timestamp or clip.",
-    );
-  }
+    if (msg.includes("clip")) {
+      if (!status.outputActive) {
+        return message.reply(
+          "🔴 OBS is not currently recording, so I can't grab a timestamp or clip.",
+        );
+      }
 
-  // OBS returns a timecode string like "00:15:30.123" showing how long it has been recording
-  const timecode = status.outputTimecode || "Unknown Time";
+      // OBS returns a timecode string like "00:15:30.123" showing how long it has been recording
+      const timecode = status.outputTimecode || "Unknown Time";
 
-  try {
-    // This tells OBS to save the last X seconds to a separate video file!
-    await obs.call("SaveReplayBuffer");
+      try {
+        // This tells OBS to save the last X seconds to a separate video file!
+        await obs.call("SaveReplayBuffer");
 
-    return message.reply(
-      `🎬 **Clip Saved!**\n⏱️ Timestamp in main recording: \`${timecode}\``,
-    );
-  } catch (replayErr) {
-    // If Replay Buffer is turned off, we still log the timestamp for you to find it easily in editing.
-    console.warn("Replay Buffer not active in OBS.");
-    return message.reply(
-      `📍 **Timestamp Logged!**\n⏱️ Exact time in recording: \`${timecode}\`\n\n*(Note: I couldn't save a separate video file. Make sure **Start Replay Buffer** is clicked in OBS if you want automatic clip files!)*`,
-    );
-  }
-}
+        return message.reply(
+          `🎬 **Clip Saved!**\n⏱️ Timestamp in main recording: \`${timecode}\``,
+        );
+      } catch (replayErr) {
+        // If Replay Buffer is turned off, we still log the timestamp for you to find it easily in editing.
+        console.warn("Replay Buffer not active in OBS.");
+        return message.reply(
+          `📍 **Timestamp Logged!**\n⏱️ Exact time in recording: \`${timecode}\`\n\n*(Note: I couldn't save a separate video file. Make sure **Start Replay Buffer** is clicked in OBS if you want automatic clip files!)*`,
+        );
+      }
+    }
     if (msg.includes("start recording")) {
       if (status.outputActive) return message.reply("Already recording.");
       await obs.call("StartRecord");
