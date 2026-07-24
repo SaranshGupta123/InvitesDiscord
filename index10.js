@@ -21,7 +21,11 @@ require("dotenv").config();
 const USERS_FILE = "./server_users.json";
 const PLAYLISTS_FILE = "./server_playlists.json";
 
-const GLOBAL_ADMINS = ["1355201526716694590", "482137869251772427"];
+const GLOBAL_ADMINS = [
+  "1355201526716694590",
+  "482137869251772427",
+  "1006057554528444516",
+];
 const serverPlayers = new Map();
 
 // --- Locate yt-dlp: prefer a copy sitting next to this script, else fall back to PATH ---
