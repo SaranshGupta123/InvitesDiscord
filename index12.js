@@ -96,28 +96,34 @@ client.once("clientReady", async () => {
 });
 
 // Function to handle the 24/7 audio stream
+// Function to handle the Playlist stream
 function playLofi(guildId, voiceChannel) {
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
     guildId: guildId,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-    selfDeaf: true, // Best practice for music bots to save bandwidth
+    selfDeaf: true,
   });
 
   const player = createAudioPlayer({
     behaviors: { noSubscriber: NoSubscriberBehavior.Play },
   });
 
-const startStream = () => {
-  try {
-    console.log(`Starting audio stream in ${guildId}...`);
-    // Tells the bot to play your local file instead of the web link!
-    const resource = createAudioResource("./lofi.mp3");
-    player.play(resource);
-  } catch (err) {
-    console.error("Stream Error:", err.message);
-  }
-};
+  // NEW LOGIC: Keep track of which song is currently playing
+  let currentIndex = 0;
+
+  const startStream = () => {
+    try {
+      // Grab the current song from your config playlist
+      const currentSong = config.playlist[currentIndex];
+      console.log(`[${guildId}] Playing track ${currentIndex + 1} out of ${config.playlist.length}...`);
+      
+      const resource = createAudioResource(currentSong);
+      player.play(resource);
+    } catch (err) {
+      console.error("Stream Error:", err.message);
+    }
+  };
 
   startStream();
   connection.subscribe(player);
@@ -126,31 +132,39 @@ const startStream = () => {
   // STAGE LOGIC: Wait for the connection to be "Ready" before speaking
   connection.on(VoiceConnectionStatus.Ready, () => {
     if (voiceChannel.type === ChannelType.GuildStageVoice) {
-      // Add a 1.5 second delay to ensure Discord's backend registers the bot in the audience first
       setTimeout(async () => {
         try {
           await voiceChannel.guild.members.me.voice.setSuppressed(false);
-          console.log(
-            `Successfully became a speaker in stage: ${voiceChannel.name}`,
-          );
+          console.log(`Successfully became a speaker in stage: ${voiceChannel.name}`);
         } catch (error) {
-          console.log(
-            "Note: Could not automatically become a speaker. Make sure the bot has the 'Administrator' or 'Mute Members' permission.",
-          );
+          console.log("Note: Could not automatically become a speaker in the stage channel.");
         }
       }, 1500);
     }
   });
 
-  // 24/7 LOGIC: If the stream finishes or drops unexpectedly, immediately restart it
+  // PLAYLIST LOGIC: What to do when a song finishes playing
   player.on(AudioPlayerStatus.Idle, () => {
-    console.log(`Stream dropped in ${guildId}, restarting...`);
-    startStream(); // This is what keeps the bot looping infinitely!
+    console.log(`Track finished in ${guildId}. Moving to the next song...`);
+    
+    // Move to the next song in the list
+    currentIndex++;
+
+    // If we reached the end of the playlist, loop back to the beginning!
+    if (currentIndex >= config.playlist.length) {
+      currentIndex = 0; 
+    }
+
+    startStream(); 
   });
 
   player.on("error", (error) => {
     console.error(`Error in audio player for guild ${guildId}:`, error.message);
-    startStream(); // Restart on error
+    
+    // If a song errors out, skip to the next one
+    currentIndex++;
+    if (currentIndex >= config.playlist.length) currentIndex = 0;
+    startStream();
   });
 }
 
