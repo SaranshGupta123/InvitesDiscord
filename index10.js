@@ -62,18 +62,22 @@ function getServerPlaylist(guildId) {
 // YouTube's sign-in/PO Token check for ordinary public videos, so yt-dlp can
 // fetch formats without any account/browser session attached.
 function createAudioPipeline(url) {
-  const args = [
-    "--extractor-args",
-    "youtube:player_client=android_vr,web_embedded,tv",
-    url,
-    "-f",
-    "bestaudio",
-    "-o",
-    "-",
-    "--no-playlist",
-    "--quiet",
-    "--no-warnings",
-  ];
+const args = [
+  "--cookies",
+  path.join(__dirname, "cookies.txt"),
+
+  "--extractor-args",
+  "youtube:player_client=android_vr,web_embedded,tv",
+
+  url,
+  "-f",
+  "bestaudio",
+  "-o",
+  "-",
+  "--no-playlist",
+  "--quiet",
+  "--no-warnings",
+];
 
   const ytdlp = spawn(YTDLP_CMD, args, {
     stdio: ["ignore", "pipe", "pipe"],
