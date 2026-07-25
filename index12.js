@@ -108,15 +108,16 @@ function playLofi(guildId, voiceChannel) {
     behaviors: { noSubscriber: NoSubscriberBehavior.Play },
   });
 
-  const startStream = () => {
-    try {
-      console.log(`Starting audio stream in ${guildId}...`);
-      const resource = createAudioResource(config.streamUrl);
-      player.play(resource);
-    } catch (err) {
-      console.error("Stream Error:", err.message);
-    }
-  };
+const startStream = () => {
+  try {
+    console.log(`Starting audio stream in ${guildId}...`);
+    // Tells the bot to play your local file instead of the web link!
+    const resource = createAudioResource("./lofi.mp3");
+    player.play(resource);
+  } catch (err) {
+    console.error("Stream Error:", err.message);
+  }
+};
 
   startStream();
   connection.subscribe(player);
