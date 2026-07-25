@@ -3,7 +3,7 @@ const {
   GatewayIntentBits,
   Events,
   PermissionsBitField,
-  ChannelType,
+  ChannelType, // <-- Add this
 } = require("discord.js");
 const {
   joinVoiceChannel,
@@ -16,7 +16,6 @@ const {
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
-const crypto = require("crypto");
 require("dotenv").config();
 
 const USERS_FILE = "./server_users.json";
@@ -33,17 +32,6 @@ const serverPlayers = new Map();
 // const LOCAL_YTDLP = path.join(__dirname, "yt-dlp.exe");
 // const YTDLP_CMD = fs.existsSync(LOCAL_YTDLP) ? LOCAL_YTDLP : "yt-dlp";
 const YTDLP_CMD = "yt-dlp";
-
-const COOKIES_PATH = path.join(__dirname, "cookies.txt");
-const CACHE_DIR = path.join(__dirname, "audio_cache");
-
-// Optional. Only needed if this host's IP ends up blocked by YouTube even
-// with a cached-download approach. Must be a residential/ISP/mobile proxy —
-// datacenter proxies get blocked the same way the host's own IP does.
-// Example: YTDLP_PROXY=http://user:pass@proxy-host:port
-const YTDLP_PROXY = process.env.YTDLP_PROXY || process.env.PROXY_URL || "";
-
-if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 function readJSON(file) {
   if (!fs.existsSync(file)) return {};
@@ -68,130 +56,51 @@ function getServerPlaylist(guildId) {
   return data[guildId] || ["https://www.youtube.com/watch?v=kyqpSycLASY"];
 }
 
-// ============================================================================
-// LOCAL AUDIO CACHE
-//
-// The old version re-ran yt-dlp against YouTube on every single loop of
-// every track, forever. That's a lot of automated requests from a cloud/
-// datacenter IP, which is exactly the pattern YouTube's "sign in to confirm
-// you're not a bot" check is built to catch — cookies don't reliably fix
-// that, because the block is usually on the IP, not the session.
-//
-// Here, each track is fetched from YouTube ONCE (when it's added, or the
-// first time it's due to play) and saved to disk. Every later play of that
-// same track is a local file read — no YouTube request, no cookies, no
-// bot-check involved at all. This also means if/when a fetch *does* need a
-// proxy, it's only spent once per song, not continuously.
-// ============================================================================
+// --- yt-dlp -> ffmpeg pipeline: yt-dlp grabs the audio, ffmpeg converts it to raw PCM ---
+// Raw PCM sidesteps any container/codec probing issues entirely.
+// No cookies file needed: these player clients aren't currently gated behind
+// YouTube's sign-in/PO Token check for ordinary public videos, so yt-dlp can
+// fetch formats without any account/browser session attached.
+function createAudioPipeline(url) {
+const args = [
+  "--cookies",
+  path.join(__dirname, "cookies.txt"),
 
-function extractVideoId(url) {
-  const match = url.match(
-    /(?:v=|\/live\/|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
-  );
-  if (match) return match[1];
-  // Fallback for URL shapes we don't recognize: still a stable, safe cache key
-  return crypto.createHash("md5").update(url).digest("hex");
-}
+  "--extractor-args",
+  "youtube:player_client=android_vr,web_embedded,tv",
 
-function findCachedFile(id) {
-  if (!fs.existsSync(CACHE_DIR)) return null;
-  const match = fs.readdirSync(CACHE_DIR).find((f) => {
-    if (!f.startsWith(`${id}.`)) return false;
-    const ext = path.extname(f).toLowerCase();
-    // Ignore leftovers from an interrupted download
-    return ext !== ".part" && ext !== ".ytdl" && ext !== ".tmp";
+  url,
+  "-f",
+  "bestaudio",
+  "-o",
+  "-",
+  "--no-playlist",
+  "--quiet",
+  "--no-warnings",
+];
+
+  const ytdlp = spawn(YTDLP_CMD, args, {
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  return match ? path.join(CACHE_DIR, match) : null;
-}
 
-const inFlightDownloads = new Map();
-
-function downloadToCache(url, id) {
-  return new Promise((resolve, reject) => {
-    const outputTemplate = path.join(CACHE_DIR, `${id}.%(ext)s`);
-    const args = [];
-
-    if (fs.existsSync(COOKIES_PATH)) {
-      args.push("--cookies", COOKIES_PATH);
-    }
-    if (YTDLP_PROXY) {
-      args.push("--proxy", YTDLP_PROXY);
-    }
-
- args.push(
-   "--force-ipv4", // Add this line to force IPv4 routing
-   "--extractor-args",
-   "youtube:player_client=android_vr,web_embedded,tv",
-   "-f",
-   "bestaudio",
-   "-o",
-   outputTemplate,
-   "--no-playlist",
-   "--no-warnings",
-   url,
- );
-    console.log(`[cache] Fetching "${id}"...`);
-    const ytdlp = spawn(YTDLP_CMD, args, {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-
-    let stderr = "";
-    ytdlp.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    ytdlp.on("error", (err) => {
-      reject(
-        new Error(
-          `yt-dlp failed to start (${YTDLP_CMD}): ${err.message}` +
-            (err.code === "ENOENT" ? " -> yt-dlp not found on PATH." : ""),
-        ),
-      );
-    });
-
-    ytdlp.on("close", (code) => {
-      const file = findCachedFile(id);
-      if (code === 0 && file) {
-        console.log(`[cache] Cached "${id}" -> ${path.basename(file)}`);
-        return resolve(file);
-      }
-      const blocked = /sign in to confirm|not a bot/i.test(stderr);
-      reject(
-        new Error(
-          blocked
-            ? `YouTube blocked this fetch (bot check) — set YTDLP_PROXY to a residential/ISP proxy, or install the yt-dlp-invidious plugin as a fallback`
-            : `yt-dlp exited ${code}: ${stderr.trim().split("\n").pop() || "unknown error"}`,
-        ),
-      );
-    });
+  ytdlp.on("error", (err) => {
+    console.error(
+      `[yt-dlp] Failed to start (${YTDLP_CMD}):`,
+      err.message,
+      err.code === "ENOENT"
+        ? "-> yt-dlp.exe not found next to the script and not on PATH."
+        : "",
+    );
   });
-}
+  ytdlp.stderr.on("data", (chunk) => {
+    console.error(`[yt-dlp stderr] ${chunk.toString().trim()}`);
+  });
 
-// De-dupes concurrent requests for the same track (e.g. two guilds sharing a
-// song at the same moment) so we never run two downloads into one filename.
-function ensureCached(url) {
-  const id = extractVideoId(url);
-  const cached = findCachedFile(id);
-  if (cached) return Promise.resolve(cached);
-
-  if (inFlightDownloads.has(id)) return inFlightDownloads.get(id);
-
-  const promise = downloadToCache(url, id).finally(() =>
-    inFlightDownloads.delete(id),
-  );
-  inFlightDownloads.set(id, promise);
-  return promise;
-}
-
-// ffmpeg now reads an already-downloaded file straight off disk and converts
-// it to raw PCM — no live network stream involved in playback at all, so
-// there's nothing left for YouTube to interrupt mid-song.
-function createPlaybackPipeline(filepath) {
   const ffmpeg = spawn(
     "ffmpeg",
     [
       "-i",
-      filepath,
+      "pipe:0",
       "-f",
       "s16le",
       "-ar",
@@ -202,7 +111,7 @@ function createPlaybackPipeline(filepath) {
       "error",
       "pipe:1",
     ],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    { stdio: ["pipe", "pipe", "pipe"] },
   );
 
   ffmpeg.on("error", (err) => {
@@ -212,9 +121,17 @@ function createPlaybackPipeline(filepath) {
     console.error(`[ffmpeg stderr] ${chunk.toString().trim()}`);
   });
 
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  // If ffmpeg's stdin closes early (e.g. yt-dlp died), don't crash the process
+  ffmpeg.stdin.on("error", () => {});
+
   return {
     output: ffmpeg.stdout,
-    kill: () => ffmpeg.kill(),
+    kill: () => {
+      ytdlp.kill();
+      ffmpeg.kill();
+    },
   };
 }
 
@@ -230,12 +147,6 @@ const client = new Client({
 client.on(Events.ClientReady, () => {
   console.log(`✅ Logged in successfully as ${client.user.tag}!`);
   console.log(`Using yt-dlp at: ${YTDLP_CMD}`);
-  console.log(`Audio cache directory: ${CACHE_DIR}`);
-  console.log(
-    YTDLP_PROXY
-      ? `Fetches will use proxy: ${YTDLP_PROXY.replace(/:\/\/.*@/, "://***@")}`
-      : "No proxy configured (set YTDLP_PROXY in .env if a fetch ever gets blocked)",
-  );
   console.log(
     "Commands: !play | !stop | !add @user | !remove @user | !addsong <link>",
   );
@@ -317,6 +228,7 @@ client.on(Events.MessageCreate, async (message) => {
     if (!hasAccess)
       return message.reply("❌ You do not have permission to add songs!");
 
+    // Everything after "!addsong " split on whitespace, one or more links
     const rawArgs = message.content.split(" ").slice(1);
     if (rawArgs.length === 0)
       return message.reply(
@@ -346,14 +258,6 @@ client.on(Events.MessageCreate, async (message) => {
 
     allPlaylists[guildId].push(...validUrls);
     writeJSON(PLAYLISTS_FILE, allPlaylists);
-
-    // Warm the cache in the background so playback never has to wait on (or
-    // fail because of) a live YouTube fetch once the loop reaches this song.
-    for (const url of validUrls) {
-      ensureCached(url).catch((err) =>
-        console.error(`[cache] Pre-fetch failed for ${url}: ${err.message}`),
-      );
-    }
 
     let reply = `✅ Added **${validUrls.length}** song${validUrls.length === 1 ? "" : "s"} to THIS server's playlist! Total songs: **${allPlaylists[guildId].length}**`;
     if (invalidUrls.length > 0) {
@@ -400,8 +304,7 @@ client.on(Events.MessageCreate, async (message) => {
         guildId: message.guild.id,
         adapterCreator: message.guild.voiceAdapterCreator,
       });
-
-      // --- STAGE CHANNEL LOGIC ---
+      // --- STAGE CHANNEL LOGIC START ---
       if (voiceChannel.type === ChannelType.GuildStageVoice) {
         let attempts = 0;
 
@@ -412,7 +315,7 @@ client.on(Events.MessageCreate, async (message) => {
 
           // Once discord.js confirms the bot is officially in the Stage channel
           if (botVoice.channel?.type === ChannelType.GuildStageVoice) {
-            clearInterval(stageInterval);
+            clearInterval(stageInterval); // Stop checking
 
             try {
               // Attempt to instantly become a speaker
@@ -431,6 +334,15 @@ client.on(Events.MessageCreate, async (message) => {
         }, 1000);
       }
       // --- STAGE CHANNEL LOGIC END ---
+      // --- STAGE CHANNEL LOGIC END ---
+
+      if (!serverPlayers.has(guildId)) {
+        serverPlayers.set(guildId, {
+          player: createAudioPlayer(),
+          currentIndex: 0,
+          currentPipeline: null,
+        });
+      }
 
       if (!serverPlayers.has(guildId)) {
         serverPlayers.set(guildId, {
@@ -454,22 +366,18 @@ client.on(Events.MessageCreate, async (message) => {
       });
 
       const playNextTrack = async () => {
-        const playlist = getServerPlaylist(guildId);
-        if (playlist.length === 0) return;
-
-        const url = playlist[serverData.currentIndex].trim();
-        console.log(`[${message.guild.name}] Attempting to play: ${url}`);
-
         try {
-          // Cache hit -> instant, local, no YouTube involved.
-          // Cache miss -> fetched once here, then cached for every future loop.
-          const filepath = await ensureCached(url);
+          const playlist = getServerPlaylist(guildId);
+          if (playlist.length === 0) return;
+
+          const url = playlist[serverData.currentIndex].trim();
+          console.log(`[${message.guild.name}] Attempting to play: ${url}`);
 
           if (serverData.currentPipeline) {
             serverData.currentPipeline.kill();
           }
 
-          const pipeline = createPlaybackPipeline(filepath);
+          const pipeline = createAudioPipeline(url);
           serverData.currentPipeline = pipeline;
 
           const resource = createAudioResource(pipeline.output, {
@@ -478,12 +386,13 @@ client.on(Events.MessageCreate, async (message) => {
           serverData.player.play(resource);
         } catch (error) {
           console.error(
-            `[${message.guild.name}] Skipping "${url}": ${error.message}`,
+            `[${message.guild.name}] Stream extraction error:`,
+            error.message,
           );
-          const freshPlaylist = getServerPlaylist(guildId);
+          const playlist = getServerPlaylist(guildId);
           serverData.currentIndex =
-            (serverData.currentIndex + 1) % freshPlaylist.length;
-          setTimeout(playNextTrack, 1500);
+            (serverData.currentIndex + 1) % playlist.length;
+          setTimeout(playNextTrack, 500);
         }
       };
 
