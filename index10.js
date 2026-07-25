@@ -118,18 +118,18 @@ function downloadToCache(url, id) {
       args.push("--proxy", YTDLP_PROXY);
     }
 
-    args.push(
-      "--extractor-args",
-      "youtube:player_client=android_vr,web_embedded,tv",
-      "-f",
-      "bestaudio",
-      "-o",
-      outputTemplate,
-      "--no-playlist",
-      "--no-warnings",
-      url,
-    );
-
+ args.push(
+   "--force-ipv4", // Add this line to force IPv4 routing
+   "--extractor-args",
+   "youtube:player_client=android_vr,web_embedded,tv",
+   "-f",
+   "bestaudio",
+   "-o",
+   outputTemplate,
+   "--no-playlist",
+   "--no-warnings",
+   url,
+ );
     console.log(`[cache] Fetching "${id}"...`);
     const ytdlp = spawn(YTDLP_CMD, args, {
       stdio: ["ignore", "ignore", "pipe"],
