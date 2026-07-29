@@ -26,6 +26,7 @@
     "gtts": "^0.2.1",
     "libsodium-wrappers": "^0.8.4",
     "mediaplex": "^1.0.0",
+    "node-cron": "^4.6.0",
     "obs-websocket-js": "^5.0.8",
     "opusscript": "^0.0.8",
     "play-dl": "^1.9.7",
