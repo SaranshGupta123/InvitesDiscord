@@ -25,7 +25,7 @@ const fs = require("fs");
 const path = require("path");
 const OBSWebSocket = require("obs-websocket-js").default;
 require("dotenv").config();
-const { registerServerLogs } = require("./server-logs");
+// const { registerServerLogs } = require("./server-logs");
 
 // =====================================================================
 // ==================  GIVEAWAY SECTION  ===============================
@@ -682,7 +682,7 @@ function normalize(str) {
 const lastListCache = new Map(); // userId -> array of channels in listed order
 
 // =====================================================================
-// ==============  COMBINED SLASH COMMAND DEFINITIONS  =================
+// ==============  COMBINED SLASH COMMAND DEFINITIONS  ================
 // =====================================================================
 
 const commands = [
@@ -908,7 +908,7 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
 });
 
-registerServerLogs(client);
+// registerServerLogs(client);
 
 client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -1179,7 +1179,6 @@ client.on("interactionCreate", async (interaction) => {
           });
         }
 
-        // Ensure the data structure exists for this server and user
         // Ensure the data structure exists for this server and user
         if (!repStore[guildId]) repStore[guildId] = {};
         if (!repStore[guildId][targetUser.id]) {
@@ -1693,6 +1692,72 @@ client.on("interactionCreate", async (interaction) => {
         components: [buildEnterRow(false)],
       });
       return;
+    }
+
+    // --- pagination handler for activity profiles ---
+    if (interaction.isButton() && interaction.customId.startsWith("act_")) {
+      const parts = interaction.customId.split("_");
+      const action = parts[1]; // next or prev
+      const targetUserId = parts[2];
+      const type = parts[3]; // voice or text
+      let page = parseInt(parts[4], 10);
+
+      if (action === "next") page++;
+      else if (action === "prev") page--;
+
+      const guildId = interaction.guildId;
+      const targetUser = await client.users.fetch(targetUserId).catch(() => null);
+      if (!targetUser) return interaction.reply({ content: "❌ User not found.", flags: MessageFlags.Ephemeral });
+
+      const stats = activityStore[guildId]?.[targetUserId] || { voice: {}, text: {} };
+      const channelData = type === "voice" ? stats.voice : stats.text;
+      const sorted = Object.entries(channelData).sort((a, b) => {
+        const sumA = Object.values(a[1]).reduce((x, y) => x + y, 0);
+        const sumB = Object.values(b[1]).reduce((x, y) => x + y, 0);
+        return sumB - sumA;
+      });
+
+      const itemsPerPage = 5;
+      const totalPages = Math.ceil(sorted.length / itemsPerPage) || 1;
+      if (page < 0) page = 0;
+      if (page >= totalPages) page = totalPages - 1;
+
+      const slice = sorted.slice(page * itemsPerPage, (page + 1) * itemsPerPage);
+      let list = "";
+      for (const [id, dates] of slice) {
+        const totalVal = Object.values(dates).reduce((x, y) => x + y, 0);
+        list += type === "voice"
+          ? `> 🎙️ <#${id}> **•** \`${formatDuration(totalVal)}\`\n`
+          : `> 💬 <#${id}> **•** \`${totalVal} msgs\`\n`;
+      }
+      if (!list) list = "> *No activity recorded.*";
+
+      const embed = EmbedBuilder.from(interaction.message.embeds[0]);
+      if (type === "voice") {
+        embed.spliceFields(0, 1, { name: `🎧 Voice Channels (Page ${page + 1}/${totalPages})`, value: list, inline: false });
+      } else {
+        embed.spliceFields(1, 1, { name: `📝 Text Channels (Page ${page + 1}/${totalPages})`, value: list, inline: false });
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`act_prev_${targetUserId}_${type}_${page}`)
+          .setLabel("◀️ Prev")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === 0),
+        new ButtonBuilder()
+          .setCustomId(`act_next_${targetUserId}_${type}_${page}`)
+          .setLabel("Next ▶️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page >= totalPages - 1)
+      );
+
+      // We maintain both buttons or recreate components. Let's make a two-row or handle per type if needed.
+      // For simplicity, let's update the specific component row or create a cleaner set.
+      return interaction.update({
+        embeds: [embed],
+        components: [row],
+      });
     }
 
     // --- confession confirm/cancel buttons ---
@@ -2221,58 +2286,77 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Helper function to format all channels beautifully while respecting Discord limits
-    const formatChannelList = (channelData, isVoice) => {
+    // Helper function to format channels for first page (5 items limit per page)
+    const getPagedList = (channelData, isVoice, page = 0) => {
       const sorted = Object.entries(channelData).sort((a, b) => b[1] - a[1]);
-      if (sorted.length === 0)
-        return "> *No activity recorded for this period.*";
+      if (sorted.length === 0) return "> *No activity recorded.*";
 
+      const slice = sorted.slice(page * 5, (page + 1) * 5);
       let list = "";
-      for (const [id, val] of sorted) {
-        const row = isVoice
+      for (const [id, val] of slice) {
+        list += isVoice
           ? `> 🎙️ <#${id}> **•** \`${formatDuration(val)}\`\n`
           : `> 💬 <#${id}> **•** \`${val} msgs\`\n`;
-
-        if (list.length + row.length > 950) {
-          list += "> *...and more channels*";
-          break;
-        }
-        list += row;
       }
       return list;
     };
 
-    const voiceList = formatChannelList(voiceByChannel, true);
-    const textList = formatChannelList(textByChannel, false);
+    const voiceList = getPagedList(voiceByChannel, true, 0);
+    const textList = getPagedList(textByChannel, false, 0);
 
-    // Label for the time scale header
     const timeLabel = timeframeDays
       ? `Past ${timeframeDays} Days`
       : "Lifetime Records";
 
-    // Beautiful Custom Embed
+    // Cute & Large Activity Profile Embed
     const embed = new EmbedBuilder()
-      .setColor("#E8769B")
+      .setColor("#FFB6C1")
       .setAuthor({
-        name: `Activity Profile — ${targetUser.username}`,
+        name: `🌸 𝓐𝓬𝓽𝓲𝓿𝓲𝓽𝔂 𝓟𝓻𝓸𝓯𝓲𝓵𝓮 — ${targetUser.username} 🌸`,
         iconURL: targetUser.displayAvatarURL({ dynamic: true }),
       })
       .setThumbnail(targetUser.displayAvatarURL({ size: 512, dynamic: true }))
       .setDescription(
-        `Server tracking records for <@${targetUser.id}>\n⏱️ **Timeframe:** \`${timeLabel}\`\n\n**🏆 Summary Totals**\n> 🗣️ **Voice:** \`${formatDuration(totalVoiceMs)}\`\n> ⌨️ **Text:** \`${totalMessages}\` messages\n\n**📈 Breakdown by Channel**`,
+        `# ✨ ${targetUser.username}'s Stats ✨\n` +
+        `> ⏱️ **Timeframe:** \`${timeLabel}\`\n\n` +
+        `### 🏆 𝓢𝓾𝓶𝓶𝓪𝓻𝔂\n` +
+        `> 🗣️ **Voice Time:** \`${formatDuration(totalVoiceMs)}\`\n` +
+        `> ⌨️ **Messages:** \`${totalMessages}\`\n\n` +
+        `### 📈 𝓒𝓱𝓪𝓷𝓷𝓮𝓵 𝓑𝓻𝓮𝓪𝓴𝓭𝓸𝔀𝓷`,
       )
       .addFields(
-        { name: "🎧 Voice Channels", value: voiceList, inline: false },
-        { name: "📝 Text Channels", value: textList, inline: false },
+        { name: "🎧 𝓥𝓸𝓲𝓬𝓮 𝓒𝓱𝓪𝓷𝓷𝓮𝓵𝓼 (Page 1)", value: voiceList, inline: false },
+        { name: "📝 𝓣𝓮𝔁𝓽 𝓒𝓱𝓪𝓷𝓷𝓮𝓵𝓼 (Page 1)", value: textList, inline: false },
       )
       .setFooter({
-        text: "🎀 𝓓𝓲𝓿𝓪𝓪 𝓑𝓸𝓽 🎀",
+        text: "🎀 𝓓𝓲𝓿𝓪𝓪 𝓑𝓸𝓽 • Stay Sweet 🎀",
         iconURL: client.user.displayAvatarURL(),
       })
       .setTimestamp();
 
+    // Add pagination buttons if data exceeds 5 items per category
+    const components = [];
+    const voiceSorted = Object.entries(voiceByChannel);
+    const textSorted = Object.entries(textByChannel);
+    if (voiceSorted.length > 5 || textSorted.length > 5) {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`act_prev_${targetUser.id}_voice_0`)
+          .setLabel("◀️ Prev Voice")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId(`act_next_${targetUser.id}_voice_0`)
+          .setLabel("Next Voice ▶️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(voiceSorted.length <= 5),
+      );
+      components.push(row);
+    }
+
     return message.reply({
       embeds: [embed],
+      components,
       allowedMentions: { repliedUser: false },
     });
   }
@@ -2877,4 +2961,4 @@ client.on("guildMemberAdd", async (member) => {
     .send({ content: `Hey ${member}! 🌸`, embeds: [welcomeEmbed] })
     .catch(console.error);
 });
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISORN_TOKEN || process.env.DISCORD_TOKEN);
