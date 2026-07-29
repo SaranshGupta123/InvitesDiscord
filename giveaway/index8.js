@@ -25,7 +25,7 @@ const fs = require("fs");
 const path = require("path");
 const OBSWebSocket = require("obs-websocket-js").default;
 require("dotenv").config();
-const { registerServerLogs } = require("./server-logs");
+// const { registerServerLogs } = require("./server-logs");
 
 // =====================================================================
 // ==================  GIVEAWAY SECTION  ===============================
@@ -310,10 +310,9 @@ async function endGiveaway(client, messageId, { reroll = false } = {}) {
 const INVITES_DATA_FILE = path.join(__dirname, "invites.json");
 const HISTORY_FILE = path.join(__dirname, "invite-history.jsonl");
 // =====================================================================
-// ==================  REPUTATION SYSTEM SECTION  ======================
+// ====================  REPUTATION SECTION  ===========================
 // =====================================================================
-
-const REP_DATA_FILE = path.join(__dirname, "reps.json");
+const REP_DATA_FILE = path.join(__dirname, "rep.json");
 
 function loadRepData() {
   if (!fs.existsSync(REP_DATA_FILE)) return {};
@@ -335,6 +334,22 @@ let repStore = loadRepData();
 // =====================================================================
 
 const ACTIVITY_DATA_FILE = path.join(__dirname, "activity.json");
+const STICKY_DATA_FILE = path.join(__dirname, "stickies.json");
+function loadStickies() {
+  if (!fs.existsSync(STICKY_DATA_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(STICKY_DATA_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveStickies(data) {
+  fs.writeFileSync(STICKY_DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+let stickies = loadStickies(); // keyed by channelId
+const isStickyUpdating = new Set(); // Debounce map to prevent rate-limit crashes
 
 function loadActivityData() {
   if (!fs.existsSync(ACTIVITY_DATA_FILE)) return {};
@@ -645,15 +660,6 @@ async function connectOBS() {
     console.error("ACTUAL OBS ERROR:", err.message);
   }
 }
-async function checkRecordingStatus() {
-  try {
-    const status = await obs.call("GetRecordStatus");
-    return status.outputActive;
-  } catch (err) {
-    console.error("OBS Status Error:", err);
-    return null;
-  }
-}
 obs.on("ConnectionClosed", () => {
   console.warn(
     "⚠️ OBS connection lost. Attempting to reconnect in 5 seconds...",
@@ -676,40 +682,48 @@ function normalize(str) {
 const lastListCache = new Map(); // userId -> array of channels in listed order
 
 // =====================================================================
-// ==============  COMBINED SLASH COMMAND DEFINITIONS  =================
+// ==============  COMBINED SLASH COMMAND DEFINITIONS  ================
 // =====================================================================
 
 const commands = [
   new SlashCommandBuilder()
     .setName("rep")
-    .setDescription("Reputation system to show who is legit and trusted")
+    .setDescription("Reputation system")
     .addSubcommand((sub) =>
       sub
         .setName("give")
-        .setDescription("Vouch for someone and give them +1 Rep")
+        .setDescription("Give +1 rep to a user")
         .addUserOption((opt) =>
           opt
             .setName("user")
-            .setDescription("The user you are repping")
+            .setDescription("The user to vouch for")
             .setRequired(true),
         )
         .addStringOption((opt) =>
           opt
             .setName("reason")
-            .setDescription("Why are they legit?")
-            .setRequired(false),
+            .setDescription("Reason for giving rep")
+            .setRequired(true),
+        ),
+    ),
+  new SlashCommandBuilder()
+    .setName("sticky")
+    .setDescription("Manage sticky messages in this channel (admin/owner only)")
+    .addSubcommand((sub) =>
+      sub
+        .setName("set")
+        .setDescription("Set a sticky message for the current channel")
+        .addStringOption((opt) =>
+          opt
+            .setName("text")
+            .setDescription("The message to stick to the bottom")
+            .setRequired(true),
         ),
     )
     .addSubcommand((sub) =>
       sub
-        .setName("view")
-        .setDescription("Check someone's rep profile")
-        .addUserOption((opt) =>
-          opt
-            .setName("user")
-            .setDescription("The user to check (defaults to you)")
-            .setRequired(false),
-        ),
+        .setName("remove")
+        .setDescription("Remove the sticky message from this channel"),
     ),
   new SlashCommandBuilder()
     .setName("activity")
@@ -890,11 +904,11 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildModeration,
-    GatewayIntentBits.GuildPresences,
   ],
+  partials: [Partials.Message, Partials.Channel],
 });
 
-registerServerLogs(client);
+// registerServerLogs(client);
 
 client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
@@ -976,14 +990,7 @@ client.once("clientReady", async () => {
 
   // --- invite tracker: cache invites for every guild the bot is in ---
   for (const guild of client.guilds.cache.values()) {
-    await updateServerStats(guild);
-
-    setInterval(
-      () => {
-        updateServerStats(guild);
-      },
-      5 * 60 * 1000,
-    );
+    await cacheGuildInvites(guild);
   }
 
   // --- Activity Tracker: Catch existing users in VC on bot start ---
@@ -1007,44 +1014,6 @@ client.once("clientReady", async () => {
     }
   }
 });
-async function updateServerStats(guild) {
-  await guild.members.fetch();
-
-  const members = guild.members.cache;
-
-  const total = members.size;
-  const humans = members.filter((m) => !m.user.bot).size;
-  const bots = members.filter((m) => m.user.bot).size;
-
-  const bciRole = guild.roles.cache.get(process.env.BCI_ROLE_ID);
-  const bciMembers = bciRole ? bciRole.members.size : 0;
-
-  const online = members.filter(
-    (m) => m.presence && m.presence.status !== "offline",
-  ).size;
-
-  const voice = members.filter((m) => m.voice.channel).size;
-
-  const boosts = guild.premiumSubscriptionCount;
-
-  const rename = async (id, text) => {
-    if (!id) return;
-
-    const channel = guild.channels.cache.get(id);
-    if (channel) await channel.setName(text).catch(console.error);
-  };
-
-  await rename(
-    process.env.TOTAL_MEMBERS_CHANNEL,
-    `👥 Total Members : ${total}`,
-  );
-  await rename(process.env.HUMANS_CHANNEL, `🧑 Humans : ${humans}`);
-  await rename(process.env.BOTS_CHANNEL, `🤖 Bots : ${bots}`);
-  await rename(process.env.BCI_CHANNEL, `💖 BCI Members : ${bciMembers}`);
-  await rename(process.env.ONLINE_CHANNEL, `🟢 Online : ${online}`);
-  await rename(process.env.VOICE_CHANNEL, `🎙️ In VC : ${voice}`);
-  await rename(process.env.BOOST_CHANNEL, `🚀 Boosts : ${boosts}`);
-}
 // --- Activity Tracker: Catch existing users in VC on bot start ---
 client.once("clientReady", () => {
   for (const guild of client.guilds.cache.values()) {
@@ -1057,6 +1026,14 @@ client.once("clientReady", () => {
       }
     }
   }
+});
+client.once("clientReady", () => {
+  console.log("Logged in Bot ID:", client.user.id);
+  console.log("Application ID:", client.application.id);
+  console.log("Guilds:");
+  client.guilds.cache.forEach((g) => {
+    console.log(`${g.name} -> ${g.id}`);
+  });
 });
 
 // --- Activity Tracker: Voice State Updates ---
@@ -1152,7 +1129,6 @@ client.on("guildMemberAdd", async (member) => {
     inviterId,
     code,
   });
-  await updateServerStats(member.guild);
 });
 
 client.on("guildMemberRemove", (member) => {
@@ -1170,18 +1146,6 @@ client.on("guildMemberRemove", (member) => {
     userId: member.id,
     inviterId: record.inviterId,
   });
-
-  updateServerStats(member.guild);
-});
-client.on("guildMemberUpdate", (oldMember, newMember) => {
-  const roleId = process.env.BCI_ROLE_ID;
-
-  const hadRole = oldMember.roles.cache.has(roleId);
-  const hasRole = newMember.roles.cache.has(roleId);
-
-  if (hadRole !== hasRole) {
-    updateServerStats(newMember.guild);
-  }
 });
 
 // =====================================================================
@@ -1193,88 +1157,150 @@ client.on("interactionCreate", async (interaction) => {
     // --- /rep ---
     if (interaction.isChatInputCommand() && interaction.commandName === "rep") {
       const sub = interaction.options.getSubcommand();
-      const guildId = interaction.guildId;
-
-      if (!repStore[guildId]) repStore[guildId] = {};
 
       if (sub === "give") {
         const targetUser = interaction.options.getUser("user", true);
-        const reason =
-          interaction.options.getString("reason") || "No reason provided.";
+        const reason = interaction.options.getString("reason", true);
+        const guildId = interaction.guildId;
 
+        // Prevent users from giving rep to themselves
         if (targetUser.id === interaction.user.id) {
           return interaction.reply({
-            content: "❌ Nice try, but you can't rep yourself!",
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-        if (targetUser.bot) {
-          return interaction.reply({
-            content: "❌ You cannot rep bots!",
+            content: "❌ You cannot give rep to yourself!",
             flags: MessageFlags.Ephemeral,
           });
         }
 
+        // Prevent giving rep to bots
+        if (targetUser.bot) {
+          return interaction.reply({
+            content: "❌ You cannot give rep to bots!",
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        // Ensure the data structure exists for this server and user
+        if (!repStore[guildId]) repStore[guildId] = {};
         if (!repStore[guildId][targetUser.id]) {
           repStore[guildId][targetUser.id] = { count: 0, history: [] };
         }
 
-        // Add rep and save history
-        repStore[guildId][targetUser.id].count += 1;
-        repStore[guildId][targetUser.id].history.push({
-          from: interaction.user.id,
-          reason: reason,
-          date: Date.now(),
-        });
-
-        // Keep history limited to the last 10 entries to save space
-        if (repStore[guildId][targetUser.id].history.length > 10) {
-          repStore[guildId][targetUser.id].history.shift();
+        // Fallback for existing users who might not have a history array yet
+        if (!repStore[guildId][targetUser.id].history) {
+          repStore[guildId][targetUser.id].history = [];
         }
 
+        // Increment the rep and store the exact reason
+        repStore[guildId][targetUser.id].count += 1;
+        repStore[guildId][targetUser.id].history.push({
+          giverId: interaction.user.id,
+          reason: reason,
+          timestamp: Date.now(),
+        });
+
+        // ==========================================
+        // YOUR SNIPPET STARTS HERE
+        // ==========================================
         saveRepData(repStore);
+
+        // --- NEW: SEND TO REP LOG CHANNEL ---
+        const repLogChannelId = process.env.REP_LOG_CHANNEL_ID;
+        if (repLogChannelId) {
+          const logChannel =
+            interaction.guild.channels.cache.get(repLogChannelId);
+          if (logChannel) {
+            const logEmbed = new EmbedBuilder()
+              .setColor(0xffd700) // Gold color for reputation
+              .setTitle("🌟 New Reputation Vouch!")
+              .setDescription(
+                `<@${interaction.user.id}> just vouched for <@${targetUser.id}>!`,
+              )
+              .addFields(
+                { name: "📝 Reason", value: reason },
+                {
+                  name: "📈 Total Rep",
+                  value: `${repStore[guildId][targetUser.id].count} Rep Points`,
+                  inline: true,
+                },
+              )
+              .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+              .setTimestamp();
+
+            logChannel.send({ embeds: [logEmbed] }).catch(console.error);
+          }
+        }
+        // ------------------------------------
 
         return interaction.reply({
           content: `✅ You gave **+1 Rep** to <@${targetUser.id}>!\n📝 **Reason:** ${reason}`,
         });
+        // ==========================================
+        // YOUR SNIPPET ENDS HERE
+        // ==========================================
+      }
+    }
+    // --- /sticky ---
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "sticky"
+    ) {
+      if (!hasAdminPermission(interaction)) {
+        return interaction.reply({
+          content: "🚫 You do not have permission to manage sticky messages.",
+          flags: MessageFlags.Ephemeral,
+        });
       }
 
-      if (sub === "view") {
-        const targetUser =
-          interaction.options.getUser("user") || interaction.user;
-        const stats = repStore[guildId]?.[targetUser.id] || {
-          count: 0,
-          history: [],
+      const sub = interaction.options.getSubcommand();
+      const channelId = interaction.channelId;
+
+      if (sub === "set") {
+        const text = interaction.options
+          .getString("text", true)
+          .replace(/\\n/g, "\n");
+
+        // Delete the old sticky if it exists before making a new one
+        if (stickies[channelId] && stickies[channelId].lastMessageId) {
+          interaction.channel.messages
+            .delete(stickies[channelId].lastMessageId)
+            .catch(() => {});
+        }
+
+        // Send the new sticky message
+        const sentMsg = await interaction.channel.send({ content: text });
+
+        stickies[channelId] = {
+          content: text,
+          lastMessageId: sentMsg.id,
         };
+        saveStickies(stickies);
 
-        const embed = new EmbedBuilder()
-          .setColor(0x00ff00)
-          .setTitle(`⭐ Reputation Profile — ${targetUser.username}`)
-          .setThumbnail(targetUser.displayAvatarURL())
-          .setDescription(
-            `<@${targetUser.id}> currently has **${stats.count}** Rep points! This shows they are legit and trusted.`,
-          )
-          .setTimestamp();
+        return interaction.reply({
+          content: "✅ Sticky message set for this channel!",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
 
-        if (stats.history.length > 0) {
-          // Grab the 5 most recent reps
-          const historyLines = stats.history
-            .slice(-5)
-            .reverse()
-            .map(
-              (h) =>
-                `> **<@${h.from}>:** ${h.reason} *(<t:${Math.floor(h.date / 1000)}:R>)*`,
-            )
-            .join("\n");
-          embed.addFields({ name: "Recent Vouches", value: historyLines });
-        } else {
-          embed.addFields({
-            name: "Recent Vouches",
-            value: "> *No rep history yet.*",
+      if (sub === "remove") {
+        if (!stickies[channelId]) {
+          return interaction.reply({
+            content: "⚠️ No sticky message exists in this channel.",
+            flags: MessageFlags.Ephemeral,
           });
         }
 
-        return interaction.reply({ embeds: [embed] });
+        const oldId = stickies[channelId].lastMessageId;
+        if (oldId) {
+          interaction.channel.messages.delete(oldId).catch(() => {});
+        }
+
+        delete stickies[channelId];
+        saveStickies(stickies);
+
+        return interaction.reply({
+          content: "✅ Sticky message removed.",
+          flags: MessageFlags.Ephemeral,
+        });
       }
     }
     // --- /activity ---
@@ -1668,6 +1694,93 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    // --- pagination handler for activity profiles ---
+    if (interaction.isButton() && interaction.customId.startsWith("act_")) {
+      const parts = interaction.customId.split("_");
+      const action = parts[1]; // next or prev
+      const targetUserId = parts[2];
+      const type = parts[3]; // voice or text
+      let page = parseInt(parts[4], 10);
+
+      if (action === "next") page++;
+      else if (action === "prev") page--;
+
+      const guildId = interaction.guildId;
+      const targetUser = await client.users
+        .fetch(targetUserId)
+        .catch(() => null);
+      if (!targetUser)
+        return interaction.reply({
+          content: "❌ User not found.",
+          flags: MessageFlags.Ephemeral,
+        });
+
+      const stats = activityStore[guildId]?.[targetUserId] || {
+        voice: {},
+        text: {},
+      };
+      const channelData = type === "voice" ? stats.voice : stats.text;
+      const sorted = Object.entries(channelData).sort((a, b) => {
+        const sumA = Object.values(a[1]).reduce((x, y) => x + y, 0);
+        const sumB = Object.values(b[1]).reduce((x, y) => x + y, 0);
+        return sumB - sumA;
+      });
+
+      const itemsPerPage = 5;
+      const totalPages = Math.ceil(sorted.length / itemsPerPage) || 1;
+      if (page < 0) page = 0;
+      if (page >= totalPages) page = totalPages - 1;
+
+      const slice = sorted.slice(
+        page * itemsPerPage,
+        (page + 1) * itemsPerPage,
+      );
+      let list = "";
+      for (const [id, dates] of slice) {
+        const totalVal = Object.values(dates).reduce((x, y) => x + y, 0);
+        list +=
+          type === "voice"
+            ? `> 🎙️ <#${id}> **•** \`${formatDuration(totalVal)}\`\n`
+            : `> 💬 <#${id}> **•** \`${totalVal} msgs\`\n`;
+      }
+      if (!list) list = "> *No activity recorded.*";
+
+      const embed = EmbedBuilder.from(interaction.message.embeds[0]);
+      if (type === "voice") {
+        embed.spliceFields(0, 1, {
+          name: `🎧 Voice Channels (Page ${page + 1}/${totalPages})`,
+          value: list,
+          inline: false,
+        });
+      } else {
+        embed.spliceFields(1, 1, {
+          name: `📝 Text Channels (Page ${page + 1}/${totalPages})`,
+          value: list,
+          inline: false,
+        });
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`act_prev_${targetUserId}_${type}_${page}`)
+          .setLabel("◀️ Prev")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page === 0),
+        new ButtonBuilder()
+          .setCustomId(`act_next_${targetUserId}_${type}_${page}`)
+          .setLabel("Next ▶️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(page >= totalPages - 1),
+      );
+
+      // We maintain both buttons or recreate components. Let's make a two-row or handle per type if needed.
+      // For simplicity, let's update the specific component row or create a cleaner set.
+      return interaction.update({
+        embeds: [embed],
+        components: [row],
+      });
+    }
+
     // --- confession confirm/cancel buttons ---
     if (
       interaction.isButton() &&
@@ -1967,6 +2080,33 @@ client.on("interactionCreate", async (interaction) => {
 // =====================================================================
 
 client.on("messageCreate", async (message) => {
+  // --- STICKY MESSAGE LOGIC ---
+  const sticky = stickies[message.channel.id];
+
+  // If there's a sticky in this channel AND it's not currently being refreshed
+  if (sticky && !isStickyUpdating.has(message.channel.id)) {
+    isStickyUpdating.add(message.channel.id);
+
+    // Delete the previous sticky message
+    if (sticky.lastMessageId) {
+      message.channel.messages.delete(sticky.lastMessageId).catch(() => {});
+    }
+
+    // Send the new one and update the ID
+    message.channel
+      .send({ content: sticky.content })
+      .then((newMsg) => {
+        sticky.lastMessageId = newMsg.id;
+        saveStickies(stickies);
+
+        // Cooldown timer (prevents bot from spam-deleting if users chat rapidly)
+        setTimeout(() => isStickyUpdating.delete(message.channel.id), 2500);
+      })
+      .catch((err) => {
+        console.error("Sticky message error:", err);
+        isStickyUpdating.delete(message.channel.id);
+      });
+  }
   if (message.author.bot) return;
   // ==========================================================
   // PREFIX COMMAND: diva @user
@@ -2167,58 +2307,77 @@ client.on("messageCreate", async (message) => {
       }
     }
 
-    // Helper function to format all channels beautifully while respecting Discord limits
-    const formatChannelList = (channelData, isVoice) => {
+    // Helper function to format channels for first page (5 items limit per page)
+    const getPagedList = (channelData, isVoice, page = 0) => {
       const sorted = Object.entries(channelData).sort((a, b) => b[1] - a[1]);
-      if (sorted.length === 0)
-        return "> *No activity recorded for this period.*";
+      if (sorted.length === 0) return "> *No activity recorded.*";
 
+      const slice = sorted.slice(page * 5, (page + 1) * 5);
       let list = "";
-      for (const [id, val] of sorted) {
-        const row = isVoice
+      for (const [id, val] of slice) {
+        list += isVoice
           ? `> 🎙️ <#${id}> **•** \`${formatDuration(val)}\`\n`
           : `> 💬 <#${id}> **•** \`${val} msgs\`\n`;
-
-        if (list.length + row.length > 950) {
-          list += "> *...and more channels*";
-          break;
-        }
-        list += row;
       }
       return list;
     };
 
-    const voiceList = formatChannelList(voiceByChannel, true);
-    const textList = formatChannelList(textByChannel, false);
+    const voiceList = getPagedList(voiceByChannel, true, 0);
+    const textList = getPagedList(textByChannel, false, 0);
 
-    // Label for the time scale header
     const timeLabel = timeframeDays
       ? `Past ${timeframeDays} Days`
       : "Lifetime Records";
 
-    // Beautiful Custom Embed
+    // Cute & Large Activity Profile Embed
     const embed = new EmbedBuilder()
-      .setColor("#E8769B")
+      .setColor("#FFB6C1")
       .setAuthor({
-        name: `Activity Profile — ${targetUser.username}`,
+        name: `🌸 𝓐𝓬𝓽𝓲𝓿𝓲𝓽𝔂 𝓟𝓻𝓸𝓯𝓲𝓵𝓮 — ${targetUser.username} 🌸`,
         iconURL: targetUser.displayAvatarURL({ dynamic: true }),
       })
       .setThumbnail(targetUser.displayAvatarURL({ size: 512, dynamic: true }))
       .setDescription(
-        `Server tracking records for <@${targetUser.id}>\n⏱️ **Timeframe:** \`${timeLabel}\`\n\n**🏆 Summary Totals**\n> 🗣️ **Voice:** \`${formatDuration(totalVoiceMs)}\`\n> ⌨️ **Text:** \`${totalMessages}\` messages\n\n**📈 Breakdown by Channel**`,
+        `# ✨ ${targetUser.username}'s Stats ✨\n` +
+          `> ⏱️ **Timeframe:** \`${timeLabel}\`\n\n` +
+          `### 🏆 𝓢𝓾𝓶𝓶𝓪𝓻𝔂\n` +
+          `> 🗣️ **Voice Time:** \`${formatDuration(totalVoiceMs)}\`\n` +
+          `> ⌨️ **Messages:** \`${totalMessages}\`\n\n` +
+          `### 📈 𝓒𝓱𝓪𝓷𝓷𝓮𝓵 𝓑𝓻𝓮𝓪𝓴𝓭𝓸𝔀𝓷`,
       )
       .addFields(
-        { name: "🎧 Voice Channels", value: voiceList, inline: false },
-        { name: "📝 Text Channels", value: textList, inline: false },
+        { name: "🎧 𝓥𝓸𝓲𝓬𝓮 𝓒𝓱𝓪𝓷𝓷𝓮𝓵𝓼 (Page 1)", value: voiceList, inline: false },
+        { name: "📝 𝓣𝓮𝔁𝓽 𝓒𝓱𝓪𝓷𝓷𝓮𝓵𝓼 (Page 1)", value: textList, inline: false },
       )
       .setFooter({
-        text: "🎀 𝓓𝓲𝓿𝓪𝓪 𝓑𝓸𝓽 🎀",
+        text: "🎀 𝓓𝓲𝓿𝓪𝓪 𝓑𝓸𝓽 • Stay Sweet 🎀",
         iconURL: client.user.displayAvatarURL(),
       })
       .setTimestamp();
 
+    // Add pagination buttons if data exceeds 5 items per category
+    const components = [];
+    const voiceSorted = Object.entries(voiceByChannel);
+    const textSorted = Object.entries(textByChannel);
+    if (voiceSorted.length > 5 || textSorted.length > 5) {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`act_prev_${targetUser.id}_voice_0`)
+          .setLabel("◀️ Prev Voice")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId(`act_next_${targetUser.id}_voice_0`)
+          .setLabel("Next Voice ▶️")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(voiceSorted.length <= 5),
+      );
+      components.push(row);
+    }
+
     return message.reply({
       embeds: [embed],
+      components,
       allowedMentions: { repliedUser: false },
     });
   }
@@ -2241,10 +2400,104 @@ client.on("messageCreate", async (message) => {
       return message.reply("❌ Could not fetch vanity.");
     }
   }
-  if (msg === ".quote") {
+  // ==========================================================
+  // ADD/REMOVE ROLE BY PARTIAL NAME: .role @user <role name>
+  // ==========================================================
+  if (msg.startsWith(".role")) {
+    // 1. Check if the person using the command is in the allowed list
+    const allowedRoleManagers = (process.env.ROLE_MANAGER_USER_IDS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (
+      !allowedRoleManagers.includes(message.author.id) &&
+      message.author.id !== message.guild.ownerId
+    ) {
+      return message.reply(
+        "🚫 You don't have permission to use the role command.",
+      );
+    }
+
+    const args = rawContent.split(/\s+/);
+    const targetMember = message.mentions.members.first();
+
+    if (!targetMember) {
+      return message.reply(
+        "⚠️ Please mention the user. Example: `.role @user admin`",
+      );
+    }
+
+    // 2. Extract the search text (everything after the command and the mention)
+    const roleSearch = rawContent
+      .replace(args[0], "") // removes ".role"
+      .replace(/<@!?\d+>/, "") // removes the user mention
+      .trim()
+      .toLowerCase();
+
+    if (!roleSearch) {
+      return message.reply(
+        "⚠️ Please type part of the role name to search for.",
+      );
+    }
+
+    // 3. Find the role (tries exact match first, then partial match)
+    let targetRole = message.guild.roles.cache.find(
+      (r) => r.name.toLowerCase() === roleSearch,
+    );
+    if (!targetRole) {
+      targetRole = message.guild.roles.cache.find((r) =>
+        r.name.toLowerCase().includes(roleSearch),
+      );
+    }
+
+    if (!targetRole) {
+      return message.reply(
+        `❌ No role found in this server containing "${roleSearch}".`,
+      );
+    }
+
+    // 4. Role Hierarchy Safety Checks
+    if (
+      message.guild.members.me.roles.highest.position <= targetRole.position
+    ) {
+      return message.reply(
+        "❌ I cannot give this role because it is higher than or equal to my own highest role.",
+      );
+    }
+    if (
+      message.member.roles.highest.position <= targetRole.position &&
+      message.guild.ownerId !== message.author.id
+    ) {
+      return message.reply(
+        "❌ You cannot manage this role because it is higher than or equal to your own highest role.",
+      );
+    }
+
+    // 5. Toggle the role
+    try {
+      if (targetMember.roles.cache.has(targetRole.id)) {
+        await targetMember.roles.remove(targetRole);
+        return message.reply(
+          `✅ Removed the **${targetRole.name}** role from ${targetMember}.`,
+        );
+      } else {
+        await targetMember.roles.add(targetRole);
+        return message.reply(
+          `✅ Added the **${targetRole.name}** role to ${targetMember}.`,
+        );
+      }
+    } catch (err) {
+      console.error("Role assign error:", err);
+      return message.reply(
+        "❌ An error occurred while trying to manage that role.",
+      );
+    }
+  }
+  if (msg === ",quote") {
     if (!message.reference) {
       return message.reply(
-        "⚠️ Reply to the message you want to quote, then type `.quote`.",
+        "⚠️ Reply to the message you want to quote, then type `,quote`.",
       );
     }
 
@@ -2490,12 +2743,30 @@ client.on("messageCreate", async (message) => {
   try {
     const status = await obs.call("GetRecordStatus");
 
-    if (msg.includes("isrecording")) {
-      return message.reply(
-        status.outputActive
-          ? "🟢 OBS is Recording."
-          : "🔴 OBS is NOT Recording.",
-      );
+    if (msg.includes("clip")) {
+      if (!status.outputActive) {
+        return message.reply(
+          "🔴 OBS is not currently recording, so I can't grab a timestamp or clip.",
+        );
+      }
+
+      // OBS returns a timecode string like "00:15:30.123" showing how long it has been recording
+      const timecode = status.outputTimecode || "Unknown Time";
+
+      try {
+        // This tells OBS to save the last X seconds to a separate video file!
+        await obs.call("SaveReplayBuffer");
+
+        return message.reply(
+          `🎬 **Clip Saved!**\n⏱️ Timestamp in main recording: \`${timecode}\``,
+        );
+      } catch (replayErr) {
+        // If Replay Buffer is turned off, we still log the timestamp for you to find it easily in editing.
+        console.warn("Replay Buffer not active in OBS.");
+        return message.reply(
+          `📍 **Timestamp Logged!**\n⏱️ Exact time in recording: \`${timecode}\`\n\n*(Note: I couldn't save a separate video file. Make sure **Start Replay Buffer** is clicked in OBS if you want automatic clip files!)*`,
+        );
+      }
     }
     if (msg.includes("start recording")) {
       if (status.outputActive) return message.reply("Already recording.");
@@ -2711,4 +2982,4 @@ client.on("guildMemberAdd", async (member) => {
     .send({ content: `Hey ${member}! 🌸`, embeds: [welcomeEmbed] })
     .catch(console.error);
 });
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISORN_TOKEN || process.env.DISCORD_TOKEN);
